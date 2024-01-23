@@ -120,26 +120,41 @@ cdef class Individual:
 
 cdef class State:
     cdef public:
-        Py_ssize_t size, n_alive, n_dead
-        set ids_alive, ids_dead #id_alived and id_dead
-        dict individuals
+        Py_ssize_t max_size, size, n_alive, n_dead
+        Py_ssize_t[:] ids, p_ids, alive_ids
+        int n_alleles
+        double[:] xs, ys, times, death_times
+        Py_ssize_t[:, :] genotypes
         
         
-    def __init__(self):
+    def __init__(self, rho, u0, t, n_alleles, l=1):
         self.size = 0
-        self.ids_alive = set()
-        self.ids_dead = set()
-        self.individuals=dict()
+        self.max_size = 2 * (rho+ u0 * rho t) * l**2
+        self.ids = np.array((max_size))
+        self.p_ids = np.array((max_size))
+        self.xs = np.array((max_size))
+        self.ys = np.array((max_size))
+        self.genotypes = np.array((max_size, n_alleles))
         self.n_alive = 0
         self.n_dead = 0
+        self.n_alleles = n_alleles
     
     @cython.boundscheck(False)
     @cython.wraparound(False)
     cdef void add(self, Py_ssize_t p_id, double time, double x, double y, Py_ssize_t[:] i_type):
+        
+        # self.individuals[self.size] = Individual(p_id, self.size, time, x, y, i_type)
+        
+        self.alive_ids[n_alive] = self.size
+        self.ids[self.size] = size
+        self.p_ids[self.size] = p_id
+        self.xs[self.size] = x
+        self.ys[self.size] = y
+        self.times[self.size] = time
+        for k in self.n_alleles:
+            self.genotypes[self.size, k] = i_type[k]
         self.size += 1
         self.n_alive += 1
-        self.ids_alive.add(self.size)
-        self.individuals[self.size] = Individual(p_id, self.size, time, x, y, i_type)
     
     @cython.boundscheck(False)
     @cython.wraparound(False)
