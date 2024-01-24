@@ -7,6 +7,7 @@ import numpy as np
 from cpython.pycapsule cimport PyCapsule_IsValid, PyCapsule_GetPointer
 from mc_lib.rndm cimport RndmWrapper
 from scipy.integrate import dblquad
+
 import matplotlib.pyplot as plt
 from tqdm import tqdm, trange
 # from anytree import NodeMixin, RenderTree
@@ -24,6 +25,15 @@ cdef extern from "time.h":
 
 cdef extern from "math.h":
     double exp(double)
+    
+from libcpp.set cimport set
+# cimport ios
+from cython.operator cimport dereference as deref, preincrement as inc
+
+cdef extern from "libset.h":
+    cdef set[int] _make_set "make_set"()
+    
+from libcpp.map cimport map
     
     
     
@@ -121,14 +131,16 @@ cdef class Individual:
 cdef class State:
     cdef public:
         Py_ssize_t size, n_alive, n_dead
-        set ids_alive, ids_dead #id_alived and id_dead
+        set[int] ids_alive
+        set[int] ids_dead #id_alived and id_dead
         dict individuals
+        # map[int, int] s
         
         
     def __init__(self):
         self.size = 0
-        self.ids_alive = set()
-        self.ids_dead = set()
+        self.ids_alive = _make_set()
+        self.ids_dead = _make_set()
         self.individuals=dict()
         self.n_alive = 0
         self.n_dead = 0
@@ -138,7 +150,7 @@ cdef class State:
     cdef void add(self, Py_ssize_t p_id, double time, double x, double y, Py_ssize_t[:] i_type):
         self.size += 1
         self.n_alive += 1
-        self.ids_alive.add(self.size)
+        self.ids_alive.insert(self.size)
         self.individuals[self.size] = Individual(p_id, self.size, time, x, y, i_type)
     
     @cython.boundscheck(False)
@@ -147,8 +159,8 @@ cdef class State:
         self.n_alive -= 1
         self.n_dead += 1
         self.individuals[i_id].death_time = death_time
-        self.ids_alive.remove(i_id)
-        self.ids_dead.add(i_id)
+        self.ids_alive.erase(i_id)
+        self.ids_dead.insert(i_id)
         
         
     cpdef void generate(self, double L, double rho, Py_ssize_t n_alleles, double proport):
