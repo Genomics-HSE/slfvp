@@ -30,8 +30,7 @@ from libcpp.set cimport set
 # cimport ios
 from cython.operator cimport dereference as deref, preincrement as inc
 
-cdef extern from "libset.h":
-    cdef set[int] _make_set "make_set"()
+
     
 from libcpp.map cimport map
     
@@ -131,16 +130,18 @@ cdef class Individual:
 cdef class State:
     cdef public:
         Py_ssize_t size, n_alive, n_dead
-        set[int] ids_alive
-        set[int] ids_dead #id_alived and id_dead
+        cdef set[int] ids_alive
+        cdef set[int] ids_dead
         dict individuals
-        # map[int, int] s
+        map[int, Individual] s
         
         
     def __init__(self):
         self.size = 0
-        self.ids_alive = _make_set()
-        self.ids_dead = _make_set()
+        # self.ids_alive.insert(-1)
+        # self.ids_dead.insert(-1)
+        # self.ids_alive = 
+        # self.ids_dead = set<int>()
         self.individuals=dict()
         self.n_alive = 0
         self.n_dead = 0
@@ -155,7 +156,7 @@ cdef class State:
     
     @cython.boundscheck(False)
     @cython.wraparound(False)
-    cdef void remove(self, Py_ssize_t i_id, death_time):
+    cdef void remove(self, Py_ssize_t i_id, double death_time):
         self.n_alive -= 1
         self.n_dead += 1
         self.individuals[i_id].death_time = death_time
@@ -199,6 +200,7 @@ cdef class SLFVP:
         double L, rho, lamda, theta, alpha, time, u0, integral, beta
         Py_ssize_t n_alleles
         double[:] probs
+        Py_ssize_t[:] alive_list
         State state
         Events events
         double [:,:] points 
@@ -216,6 +218,7 @@ cdef class SLFVP:
         self.time = 0
         self.integral = dblquad(lambda x, y: self.u(self.L/2, self.L/2, x,y), 0, self.L, 0,  self.L )[0]
         self.probs = np.empty(int(rho*L**2)*3 + 1)
+        self.alive_list = np.empty(int(rho*L**2)*3 + 1, dtype=int)
         self.seed = RndmWrapper(seed=(123, 0))
         self.points = np.empty((int(rho*L**2)*10,3), dtype = float)
         self.events = Events()
@@ -228,15 +231,16 @@ cdef class SLFVP:
         
         cdef double sum_p = 0
         cdef Py_ssize_t i, p_id
-        cdef list list_alive = list(self.state.ids_alive)
-        for i in range(self.state.n_alive):
+        # cdef list list_alive = list(self.state.ids_alive)
+        for i, r in enumerate(self.state.ids_alive):
+            self.alive_list[i] = r 
             self.probs[i] = self.v(z1, z2,
-                                    self.state.individuals[list_alive[i]].x, self.state.individuals[list_alive[i]].y)
+                                    self.state.individuals[r].x, self.state.individuals[r].y)
             sum_p += self.probs[i]
         for i in range(self.state.n_alive):
             self.probs[i] /= sum_p
         p_id = random_choice(self.probs)
-        return self.state.individuals[list_alive[p_id]]
+        return self.state.individuals[self.alive_list[p_id]] ## COSTYL
     
     
     
@@ -247,11 +251,9 @@ cdef class SLFVP:
         cdef double x1, x2
         cdef Py_ssize_t i
         cdef list ids
-        cdef list list_alive = list(self.state.ids_alive)
-        for i in list_alive:
-            x1 = self.state.individuals[i].x
-            x2 = self.state.individuals[i].y
-            if drand48() < self.u(z1, z2, x1, x2):
+        # cdef list list_alive = list(self.state.ids_alive)
+        for i in self.state.ids_alive:
+            if drand48() < self.u(z1, z2, x1 = self.state.individuals[i].x,  x2 = self.state.individuals[i].y):
                 self.state.remove(i, time)
                 
 
@@ -265,9 +267,10 @@ cdef class SLFVP:
         cdef Py_ssize_t[:] i_type
         parent = self.choose_parent(z1, z2)
         p_id = parent.i_id
-        i_type = np.copy(parent.i_type)
+        # i_type = np.copy(parent.i_type)
+        
         # for k in range(self.n_alleles):
-            # i_type[k] = 
+            # i_type[k] = parent.i_type[k]
         max_intensity = self.u(z1, z2, z1, z2)
         # print(f"{total_intensity=}\n{max_intensity=}")
         n_points = random_poisson(self.seed.rng, self.rho * self.integral) # Тут вроде total
@@ -279,7 +282,7 @@ cdef class SLFVP:
             x2 = self.L * drand48()
 
             if self.L**2 * self.u(z1, z2, x1, x2) >= max_intensity * drand48():
-                self.state.add(p_id, time, x1, x2, i_type)
+                self.state.add(p_id, time, x1, x2, parent.i_type) #Возможно с parent i_type плохо
                 generated += 1
                 
                 
