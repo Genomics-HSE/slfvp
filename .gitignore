@@ -20,4 +20,5 @@ gargammel*
 *.c
 *.cpp
 *.html
+*.swp
 __pycache__
