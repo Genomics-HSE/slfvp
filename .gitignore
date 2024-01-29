@@ -1,0 +1,23 @@
+#fasta indexes
+*.fai
+*.bai
+*.sa
+#logs
+*.log
+gatk.jar
+*.bam
+*.gz
+*.csi
+*.cns
+*.amb
+*.ann
+*.bwt
+*.pac
+gargammel*
+.ipynb_checkpoints
+.DS_Store
+*.pyc
+*.c
+*.cpp
+*.html
+__pycache__
