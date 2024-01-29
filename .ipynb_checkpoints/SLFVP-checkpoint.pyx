@@ -34,7 +34,7 @@ cdef Py_ssize_t  random_choice(double[:] probs):
     '''Returns random number from 0 to n-1 according to probs
         Check if probs do not sum up to 1!'''
     
-    cdef int Py_ssize_t
+    # cdef int Py_ssize_t
     cdef double x = drand48()
     cdef double cum_probs = 0
     cdef Py_ssize_t n = 0
@@ -109,7 +109,7 @@ cdef class State:
         
     def __init__(self, double rho, double u0, Py_ssize_t t, Py_ssize_t n_alleles, double l=1):
         self.size = 0
-        self.max_size = int(2 * (rho + u0 * rho * t) * l**2)
+        self.max_size = int(2 * (rho + rho * t) * l**2)
         self.ids = np.empty(self.max_size, dtype = int)
         self.p_ids = np.empty(self.max_size, dtype = int)
         self.xs = np.empty(self.max_size)
@@ -121,16 +121,13 @@ cdef class State:
         self.n_dead = 0
         self.n_alleles = n_alleles
         
-        self.ids_alive = np.empty(self.max_size, dtype = int)
-        self.ids_to_die = np.empty(self.max_size, dtype = int)
+        self.ids_alive = np.full(self.max_size, -1, dtype = int)
+        self.ids_to_die = np.full(self.max_size, -1, dtype = int)
     
     @cython.boundscheck(False)
     @cython.wraparound(False)
+    
     cdef void add(self, Py_ssize_t p_id, double time, double x, double y, Py_ssize_t[:] i_type):
-        
-        # self.individuals[self.size] = Individual(p_id, self.size, time, x, y, i_type)
-        
-        # self.alive_ids[self.n_alive] = self.size
         self.ids[self.size] = self.size
         self.p_ids[self.size] = p_id
         self.xs[self.size] = x
@@ -139,17 +136,7 @@ cdef class State:
         for k in range(self.n_alleles):
             self.genotypes[self.size, k] = i_type[k]
         self.size += 1
-        self.n_alive += 1
-    
-#     @cython.boundscheck(False)
-#     @cython.wraparound(False)
-#     cdef void remove(self, Py_ssize_t i_id, death_time):
-#         self.n_alive -= 1
-#         self.n_dead += 1
-#         self.individuals[i_id].death_time = death_time
-#         self.ids_alive.remove(i_id)
-#         self.ids_dead.add(i_id)
-        
+
         
     cpdef void generate(self, double L, double rho, Py_ssize_t n_alleles, double proport):
         cdef Py_ssize_t i
@@ -188,7 +175,7 @@ cdef class SLFVP:
     cdef public:
         RndmWrapper seed
         double L, rho, lamda, theta, alpha, time, u0, integral, beta
-        Py_ssize_t n_alleles, n_epoch
+        Py_ssize_t n_alleles, n_epoch, died
         double [:] probs
         Py_ssize_t [:] ids_newborn
         State state
@@ -202,6 +189,7 @@ cdef class SLFVP:
         self.theta=theta
         self.alpha=alpha
         self.lamda = lamda
+        self.died = 0
         self.beta = 1
         self.state = State(rho, u0, t, n_alleles, L)
         self.n_epoch = t
@@ -221,17 +209,21 @@ cdef class SLFVP:
     cpdef Py_ssize_t choose_parent(self, double z1, double z2):
         
         cdef double sum_p = 0
-        cdef Py_ssize_t i, p_id
-        for i in self.state.ids_alive:
-            if i == -1:
-                break
+        cdef Py_ssize_t i = 0, p_id, k = 0
+        
+        
+        while self.state.ids_alive[i]!=-1:
             self.probs[i] = self.v(z1, z2,
-                                    self.state.xs[i], self.state.ys[i])
+                                    self.state.xs[self.state.ids_alive[i]], self.state.ys[self.state.ids_alive[i]])
             sum_p += self.probs[i]
-        for i in range(self.state.n_alive):
-            self.probs[i] /= sum_p
-        p_id = random_choice(self.probs)
-        return self.state.ids_alive[p_id]
+            i += 1
+            
+        for k in range(self.state.n_alive):
+            self.probs[k] /= sum_p
+        p_id_index = random_choice(self.probs)
+        assert(p_id_index >= 0 and p_id_index < self.state.n_alive)
+        # print(self.state.ids_alive[p_id_index])
+        return self.state.ids_alive[p_id_index]
     
     
     
@@ -240,19 +232,23 @@ cdef class SLFVP:
     @cython.cdivision(True)
     cpdef void extinction(self, double z1, double z2, double time):
         cdef double x1, x2
-        cdef Py_ssize_t i, k=0
-        for i in self.state.ids_alive:
-            if i == -1:
-                break
-            x1 = self.state.xs[i]
-            x2 = self.state.ys[i]
+        cdef Py_ssize_t i = 0, k=0
+        self.died = 0
+        while self.state.ids_alive[i] != -1:
+            x1 = self.state.xs[self.state.ids_alive[i]]
+            x2 = self.state.ys[self.state.ids_alive[i]]
             if drand48() < self.u(z1, z2, x1, x2):
                 self.state.ids_to_die[k] = i
                 k+=1
+                # self.state.ids_alive[i] = -1
+                self.died += 1
+            i += 1
+                
+                
             
         self.state.ids_to_die[k] = -1
         
-        self.state.n_alive -= k
+        # self.state.n_alive -= k
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
@@ -263,11 +259,14 @@ cdef class SLFVP:
         cdef Py_ssize_t[:] i_type
         p_id = self.choose_parent(z1, z2)
         i_type = self.state.genotypes[p_id]
+        # print(list(i_type))
+        # i_type[0] = 1
         # for k in range(self.n_alleles):
-            # i_type[k] = 
+            # i_type[k] = self.state.genotypes[p_id,k]
         max_intensity = self.u(z1, z2, z1, z2)
         # print(f"{total_intensity=}\n{max_intensity=}")
-        n_points = random_poisson(self.seed.rng, self.rho * self.integral) # Тут вроде total
+        # n_points = random_poisson(self.seed.rng, self.rho * self.integral) # Тут вроде total
+        n_points = self.died
         # print(f'{rho * total_intensity=}')
         # print(f'recolonized {n_points=}')
         generated = 0
@@ -278,54 +277,56 @@ cdef class SLFVP:
             if self.L**2 * self.u(z1, z2, x1, x2) >= max_intensity * drand48():
                 self.state.add(p_id, time, x1, x2, i_type)
                 self.ids_newborn[generated] = self.state.size
-                self.state.size += 1
                 generated += 1
                 
         self.ids_newborn[generated] = -1
-        
-        self.state.n_alive += n_points
+                # self.state.n_alive += n_points
                 
     
-    cpdef void shift(self):
-        cdef Py_ssize_t length, k = 0, s = 1
-        length = len(self.state.ids_alive)
-        
-        for i in self.state.ids_to_die:
-            if i == -1:
-                break
-            if self.state.ids_alive[i] == -1:
-                break
-        if i != -1 and  self.state.ids_alive[i] == -1:
-            s = i+1
-            while i < self.state.n_alive:
-                while self.state.ids_alive[s] == -1:
-                    s += 1
-                self.state.ids_alive[i] = self.state.ids_alive[s]
+
                 
         
-        
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    @cython.cdivision(True)
     cpdef replace(self):
-        cdef Py_ssize_t length1, length2, k=0, j=0, s=0
-        length1 = len(self.state.ids_to_die)
-        length2 = len(self.state.ids_alive)
-        length3 = len(self.ids_newborn)
+        cdef Py_ssize_t length1, length2, k=0, j=0
+
         
-        while self.state.ids_to_die[k]!= -1 and self.ids_newborn[j]!= -1 and k < length1:
+        while self.state.ids_to_die[k]!= -1 and self.ids_newborn[j]!= -1:
             self.state.ids_alive[self.state.ids_to_die[k]] = self.ids_newborn[j]
             k+=1
             j+=1
-        while k+s<length2 and self.ids_newborn[j]!= -1 and j < length3:
-            self.state.ids_alive[self.state.ids_to_die[k+s]] = self.ids_newborn[j]
-            j+=1
-            s+=1
+            
         
+        # while self.ids_newborn[j]!= -1:
+        #     assert(0)
+        #     self.state.ids_alive[self.state.n_alive+s] = self.ids_newborn[j]
+        #     j+=1
+        #     s+=1
+        # self.state.n_alive += j - k
+        
+        
+        
+        # while j-k+p < 1:
+        #     if self.state.ids_alive[self.state.ids_to_die[k] + s] == -1:
+        #         p += 1
+        #     else:
+        #         r += 1
+        #         self.state.ids_alive[self.state.ids_to_die[k] + s - p] = self.state.ids_alive[self.state.ids_to_die[k] + s]
+        #     s += 1
+                
+        
+        
+
         
     
     cpdef void propagate(self, double z1, double z2, double time):# parameters -- list [L, rho, u0, alpha, theta]
         self.extinction(z1, z2, time)
         self.recolonization(z1, z2, time)
         self.replace()
-        self.shift()
+        # assert(np.sum(np.array(self.state.ids_alive)!=-1) == self.state.n_alive)
+        # self.shift()
     
     
     cpdef void run(self):
@@ -470,7 +471,7 @@ cdef class SLFVP:
         plt.show();
         
         
-    def plot_alleles(self, alpha=0.5):
+    cpdef plot_alleles(self, alpha=0.5):
         cdef list xs1, xs2, ys1, ys2
         xs1 = list()
         xs2 = list()
