@@ -14,10 +14,12 @@ from tqdm import tqdm, trange
 from numpy.random.c_distributions cimport random_poisson
 # import pickle
 
+
 cdef extern from "stdlib.h":
     double drand48()
     void srand48(long int seedval)
 
+    
 cdef extern from "time.h":
     long int time(int)
     
@@ -31,8 +33,10 @@ cdef extern from "math.h":
 @cython.wraparound(False)
 @cython.boundscheck(False)
 cdef Py_ssize_t  random_choice(double[:] probs):
-    '''Returns random number from 0 to n-1 according to probs
-        Check if probs do not sum up to 1!'''
+    '''
+    Returns random number from 0 to n-1 according to probs
+        Check if probs do not sum up to 1!
+    '''
     
     # cdef int Py_ssize_t
     cdef double x = drand48()
@@ -99,10 +103,16 @@ cdef class Events:
 
 
 cdef class State:
+    '''
+    State class describe state of model:
+    all individuals who have lived and died, number of alive individuals and those who died.
+    This class provide you with information about indiviuals. Where were they born, who are their parents, and what are their genotype.
+    In the end, everything pass away, so States contains death_time.
+    '''
     cdef public:
         Py_ssize_t max_size, size, n_alive, n_dead
         Py_ssize_t[:] ids, p_ids, ids_alive, ids_to_die
-        Py_ssize_t n_alleles
+        Py_ssize_t n_alleles # It should be inhereted by SLFVP.
         double[:] xs, ys, times, death_times
         Py_ssize_t[:, :] genotypes
         
@@ -124,9 +134,9 @@ cdef class State:
         self.ids_alive = np.full(self.max_size, -1, dtype = int)
         self.ids_to_die = np.full(self.max_size, -1, dtype = int)
     
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
     
+    @cython.boundscheck(False)
+    @cython.wraparound(False) 
     cdef void add(self, Py_ssize_t p_id, double time, double x, double y, Py_ssize_t[:] i_type):
         self.ids[self.size] = self.size
         self.p_ids[self.size] = p_id
@@ -173,16 +183,17 @@ cdef inline double tor2_distance(double x1, double x2, double y1, double y2,  do
 
 cdef class SLFVP:
     cdef public:
-        RndmWrapper seed
-        double L, rho, lamda, theta, alpha, time, u0, integral, beta
-        Py_ssize_t n_alleles, n_epoch, died
-        double [:] probs
-        Py_ssize_t [:] ids_newborn
         State state
         Events events
+        double L, rho, lamda, theta, alpha, time, u0, integral, beta
+        double [:] probs
         double [:,:] points 
+        Py_ssize_t n_alleles, n_epoch, died
+        Py_ssize_t [:] ids_newborn
+        RndmWrapper seed
         
-    def __init__(self, double L=1, double lamda=1, double u0=0.4, double rho=1000, double theta=0.5, double alpha=1, Py_ssize_t n_alleles=10, t = 1000):
+    def __init__(self, double L=1, double lamda=1, double u0=0.4, double rho=1000, double theta=0.5,
+                 double alpha=1, Py_ssize_t n_alleles=10, n_epoch = 1000):
         self.rho=rho
         self.L=L
         self.u0=u0
@@ -191,8 +202,8 @@ cdef class SLFVP:
         self.lamda = lamda
         self.died = 0
         self.beta = 1
-        self.state = State(rho, u0, t, n_alleles, L)
-        self.n_epoch = t
+        self.state = State(rho, u0, n_epoch, n_alleles, L)
+        self.n_epoch = n_epoch
         self.n_alleles = n_alleles
         self.time = 0
         self.integral = dblquad(lambda x, y: self.u(self.L/2, self.L/2, x,y), 0, self.L, 0,  self.L )[0]
@@ -202,11 +213,15 @@ cdef class SLFVP:
         self.points = np.empty((int(rho*L**2)*10,3), dtype = float)
         self.events = Events()
         
+        
     @cython.boundscheck(False)
     @cython.wraparound(False)
     @cython.cdivision(True)
     @cython.nonecheck(False)
     cpdef Py_ssize_t choose_parent(self, double z1, double z2):
+        '''
+        This method chooses parent for new generation, and return its id
+        '''
         
         cdef double sum_p = 0
         cdef Py_ssize_t i = 0, p_id, k = 0
@@ -218,11 +233,12 @@ cdef class SLFVP:
             sum_p += self.probs[i]
             i += 1
             
-        for k in range(self.state.n_alive):
+        for k in range(self.state.n_alive): # Probability sums up to 1
             self.probs[k] /= sum_p
         p_id_index = random_choice(self.probs)
-        assert(p_id_index >= 0 and p_id_index < self.state.n_alive)
-        # print(self.state.ids_alive[p_id_index])
+        
+        
+        # assert(p_id_index >= 0 and p_id_index < self.state.n_alive)
         return self.state.ids_alive[p_id_index]
     
     
@@ -231,15 +247,20 @@ cdef class SLFVP:
     @cython.wraparound(False)
     @cython.cdivision(True)
     cpdef void extinction(self, double z1, double z2, double time):
+        '''
+        All shall fade once.
+        This method go through all alive individuals, and wheighing their live. With probability, depending on distance from calamity every individual dies: its time is written in state, and index(position in ids_alive) is written in ids_to_die 
+        '''
         cdef double x1, x2
         cdef Py_ssize_t i = 0, k=0
         self.died = 0
         while self.state.ids_alive[i] != -1:
-            x1 = self.state.xs[self.state.ids_alive[i]]
+            x1 = self.state.xs[self.state.ids_alive[i]] 
             x2 = self.state.ys[self.state.ids_alive[i]]
-            if drand48() < self.u(z1, z2, x1, x2):
+            if drand48() < self.u(z1, z2, x1, x2):  
                 self.state.ids_to_die[k] = i
                 k+=1
+                self.state.death_times[k] = time # Model remember the time of death
                 # self.state.ids_alive[i] = -1
                 self.died += 1
             i += 1
@@ -250,37 +271,35 @@ cdef class SLFVP:
         
         # self.state.n_alive -= k
 
+        
     @cython.boundscheck(False)
     @cython.wraparound(False)
     @cython.cdivision(True)
     cpdef void recolonization(self, double z1, double z2, double time):
-        cdef Py_ssize_t n_points, generated, k,
-        cdef double x1, x2
+        '''
+        Life has always been the end, while it is wisdom that shall be the means.
+        This method uses rejection sampling and creates new individuals. Data about them is written in State, and id is written in ids_newborn 
+        '''
+        cdef Py_ssize_t n_points, generated, k,       
         cdef Py_ssize_t[:] i_type
+        cdef double x1, x2
+        
         p_id = self.choose_parent(z1, z2)
         i_type = self.state.genotypes[p_id]
-        # print(list(i_type))
-        # i_type[0] = 1
-        # for k in range(self.n_alleles):
-            # i_type[k] = self.state.genotypes[p_id,k]
         max_intensity = self.u(z1, z2, z1, z2)
-        # print(f"{total_intensity=}\n{max_intensity=}")
-        # n_points = random_poisson(self.seed.rng, self.rho * self.integral) # Тут вроде total
-        n_points = self.died
-        # print(f'{rho * total_intensity=}')
-        # print(f'recolonized {n_points=}')
+        # n_points = self.died
+        n_points = random_poisson(self.seed.rng, self.rho * self.integral)
+        
         generated = 0
         while generated < n_points:
             x1 = self.L * drand48()
             x2 = self.L * drand48()
 
-            if self.L**2 * self.u(z1, z2, x1, x2) >= max_intensity * drand48():
+            if self.L**2 * self.u(z1, z2, x1, x2) >= max_intensity * drand48():#Rejection sampling for inhomogenous Poisson point process
                 self.state.add(p_id, time, x1, x2, i_type)
                 self.ids_newborn[generated] = self.state.size
                 generated += 1
-                
-        self.ids_newborn[generated] = -1
-                # self.state.n_alive += n_points
+        self.ids_newborn[generated] = -1 #Indicates end
                 
     
 
@@ -290,32 +309,39 @@ cdef class SLFVP:
     @cython.wraparound(False)
     @cython.cdivision(True)
     cpdef replace(self):
-        cdef Py_ssize_t length1, length2, k=0, j=0
+        '''
+        Death is not the opposite of life, but a part of it.
+        
+        This method replaces Individuals, who died in extinction method to those, who were born in recolonization method. If the number of died prevales over the number of born, then ids of dead are erased, and gaps are shifted.
+        '''
+        cdef Py_ssize_t length1, length2, k=0, j=0, s=0, p = 0
 
         
-        while self.state.ids_to_die[k]!= -1 and self.ids_newborn[j]!= -1:
+        while self.state.ids_to_die[k]!= -1 and self.ids_newborn[j]!= -1: #while there are both who should pass away and who are to be born.
             self.state.ids_alive[self.state.ids_to_die[k]] = self.ids_newborn[j]
             k+=1
             j+=1
             
         
-        # while self.ids_newborn[j]!= -1:
-        #     assert(0)
-        #     self.state.ids_alive[self.state.n_alive+s] = self.ids_newborn[j]
-        #     j+=1
-        #     s+=1
-        # self.state.n_alive += j - k
+        
+        while self.ids_newborn[j]!= -1: # If number of born is bigger the number of died, then newborn are written in the end.
+            self.state.ids_alive[self.state.n_alive+s] = self.ids_newborn[j]
+            j+=1
+            s+=1
+            
         
         
+        #Если j < k то часть живых особей в ids_alive разделена -1. Таких пробелов должно быть k - j
         
-        # while j-k+p < 1:
-        #     if self.state.ids_alive[self.state.ids_to_die[k] + s] == -1:
-        #         p += 1
-        #     else:
-        #         r += 1
-        #         self.state.ids_alive[self.state.ids_to_die[k] + s - p] = self.state.ids_alive[self.state.ids_to_die[k] + s]
-        #     s += 1
+        if self.ids_newborn[j]== -1 and self.state.ids_to_die[k]!= -1:
+            while self.state.ids_to_die[k] + s < self.state.n_alive:   
+                if self.state.ids_alive[self.state.ids_to_die[k] + s] == -1:
+                    p += 1
+                else:
+                    self.state.ids_alive[self.state.ids_to_die[k] + s - p] = self.state.ids_alive[self.state.ids_to_die[k] + s]
+                s += 1
                 
+        self.state.n_alive += j - k
         
         
 
@@ -325,11 +351,10 @@ cdef class SLFVP:
         self.extinction(z1, z2, time)
         self.recolonization(z1, z2, time)
         self.replace()
-        # assert(np.sum(np.array(self.state.ids_alive)!=-1) == self.state.n_alive)
-        # self.shift()
     
     
     cpdef void run(self):
+        '''But eternity is far too cruel fate for you, Ei'''
         cdef Py_ssize_t i
         for i in trange(self.events.size):
             self.propagate(self.events.xs[i], self.events.ys[i], self.events.times[i]) 
@@ -357,6 +382,12 @@ cdef class SLFVP:
     
     
     
+    '''
+    You who were born with original sin. Go forth and search for the long-buried truth, before all is lost beneath the waves. I will use the past to judje the future. --Neuvilette
+    
+    Next methods nor affect evolution of system, but analyse it. Here you may see mathod to calculate some genomic characteristics, make plots and build geneaologic trees.
+    
+    '''
     cpdef coalescense_time(self, Py_ssize_t id1, Py_ssize_t id2):
             cdef:
                 double birth_time, RMCA_time
@@ -413,7 +444,6 @@ cdef class SLFVP:
         
                 
             
-    #-------------
     def density(self, z1, z2):
         denom = 0
         thetas = np.zeros(self.n_alleles)
@@ -497,7 +527,7 @@ cdef class SLFVP:
             else:
                 xs4.append(self.state.xs[i])
                 ys4.append(self.state.ys[i])
-        plt.scatter(xs1, ys1, alpha, label ='00 allele')
+        plt.scatter(xs1, ys1, alpha, label = '00 allele')
         plt.scatter(xs2, ys2, alpha, label = '01 allele')
         plt.scatter(xs3, ys3, alpha, label = '10 allele')
         plt.scatter(xs4, ys4, alpha, label = '11 allele')
