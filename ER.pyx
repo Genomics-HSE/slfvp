@@ -9,11 +9,14 @@ from mc_lib.rndm cimport RndmWrapper
 from scipy.integrate import dblquad
 import matplotlib.pyplot as plt
 from tqdm import tqdm, trange
-# from anytree import NodeMixin, RenderTree
-# from anytree import find_by_attr, PreOrderIter
+from anytree import NodeMixin, RenderTree
+from anytree import find_by_attr, PreOrderIter
 from numpy.random.c_distributions cimport random_poisson
 # import pickle
-
+import networkx as nx
+import queue
+from networkx.drawing.nx_pydot import graphviz_layout
+import errno
 
 cdef extern from "stdlib.h":
     double drand48()
@@ -117,9 +120,9 @@ cdef class State:
         Py_ssize_t[:, :] genotypes
         
         
-    def __init__(self, double rho, double u0, Py_ssize_t t, Py_ssize_t n_alleles, double l=1):
+    def __init__(self, double rho, double u0, Py_ssize_t t, Py_ssize_t n_alleles, pd, double l=1):
         self.size = 0
-        self.max_size = int(2 * (rho + rho * t) * l**2)
+        self.max_size = int(1.05 * (rho + rho * pd * t) * l**2)
         self.ids = np.empty(self.max_size, dtype = int)
         self.p_ids = np.empty(self.max_size, dtype = int)
         self.xs = np.empty(self.max_size)
@@ -143,6 +146,7 @@ cdef class State:
         self.xs[self.size] = x
         self.ys[self.size] = y
         self.times[self.size] = time
+        self.death_times[self.size] = -1
         for k in range(self.n_alleles):
             self.genotypes[self.size, k] = i_type[k]
         self.size += 1
@@ -161,6 +165,7 @@ cdef class State:
             self.xs[self.size] = xs[i]
             self.ys[self.size] = ys[i]
             self.times[self.size] = 0
+            self.death_times[self.size] = -1
             for k in range(self.n_alleles):
                 self.genotypes[self.size, k] = alleles[i,k]
             self.size += 1
@@ -181,14 +186,14 @@ cdef inline double tor2_distance(double x1, double x2, double y1, double y2,  do
     return (min(abs(x1 - y1), w - abs(x1 - y1))**2 + min(abs(x2 - y2), h - abs(x2 - y2))**2)
 
 
-cdef class SLFVP:
+cdef class ER:
     cdef public:
         State state
         Events events
         double L, rho, lamda, theta, alpha, time, u0, integral, beta
         double [:] probs
         double [:,:] points 
-        Py_ssize_t n_alleles, n_epoch, died
+        Py_ssize_t n_alleles, n_epoch, died, born
         Py_ssize_t [:] ids_newborn
         RndmWrapper seed
         
@@ -201,12 +206,14 @@ cdef class SLFVP:
         self.alpha=alpha
         self.lamda = lamda
         self.died = 0
+        self.born = 0
         self.beta = 1
         self.state = State(rho, u0, n_epoch, n_alleles, L)
         self.n_epoch = n_epoch
         self.n_alleles = n_alleles
         self.time = 0
-        self.integral = dblquad(lambda x, y: self.u(self.L/2, self.L/2, x,y), 0, self.L, 0,  self.L )[0]
+        self.integral = dblquad(lambda x, y: self.u(self.L/2, self.L/2, x,y), -self.L/2, self.L/2, -self.L/2,  self.L/2 )[0]
+        self.state = State(rho, u0, n_epoch, n_alleles, self.integral, L)
         self.probs = np.empty(int(rho*L**2)*3 + 1)
         self.ids_newborn = np.empty(int(rho*L**2)*3 + 1, dtype = int)
         self.seed = RndmWrapper(seed=(123, 0))
@@ -224,7 +231,7 @@ cdef class SLFVP:
         '''
         
         cdef double sum_p = 0
-        cdef Py_ssize_t i = 0, p_id, k = 0
+        cdef Py_ssize_t i = 0, k = 0
         
         
         while self.state.ids_alive[i]!=-1:
@@ -260,8 +267,7 @@ cdef class SLFVP:
             if drand48() < self.u(z1, z2, x1, x2):  
                 self.state.ids_to_die[k] = i
                 k+=1
-                self.state.death_times[k] = time # Model remember the time of death
-                # self.state.ids_alive[i] = -1
+                self.state.death_times[self.state.ids_alive[i]] = time # Model remember the time of death
                 self.died += 1
             i += 1
                 
@@ -297,9 +303,11 @@ cdef class SLFVP:
 
             if self.L**2 * self.u(z1, z2, x1, x2) >= max_intensity * drand48():#Rejection sampling for inhomogenous Poisson point process
                 self.state.add(p_id, time, x1, x2, i_type)
-                self.ids_newborn[generated] = self.state.size
+                self.ids_newborn[generated] = self.state.size-1
                 generated += 1
         self.ids_newborn[generated] = -1 #Indicates end
+        # print(f'died = \t{self.died}\tborn = \t{n_points}')
+        self.born = n_points
                 
     
 
@@ -341,7 +349,11 @@ cdef class SLFVP:
                     self.state.ids_alive[self.state.ids_to_die[k] + s - p] = self.state.ids_alive[self.state.ids_to_die[k] + s]
                 s += 1
                 
-        self.state.n_alive += j - k
+                
+        self.state.n_alive += self.born - self.died
+        
+        self.state.ids_alive[self.state.n_alive] = -1
+        
         
         
 
@@ -356,8 +368,35 @@ cdef class SLFVP:
     cpdef void run(self):
         '''But eternity is far too cruel fate for you, Ei'''
         cdef Py_ssize_t i
-        for i in trange(self.events.size):
+        for i in range(self.events.size):
+        # for i in trange(self.events.size):
             self.propagate(self.events.xs[i], self.events.ys[i], self.events.times[i]) 
+            
+            
+    cpdef double calc_hetero(self, allele=0):
+        cdef Py_ssize_t k=0, i
+        cdef double prop=0
+        
+        for i in self.state.ids_alive:
+            if i == -1:
+                break
+            if self.state.genotypes[i, allele] == 1:
+                k += 1
+        prop = k/self.state.n_alive
+        
+        return 2 * prop*(1-prop)
+            
+            
+    cpdef double[:] run_with_het(self):
+        '''But eternity is far too cruel fate for you, Ei'''
+        cdef double[:] hets
+        cdef Py_ssize_t i
+        hets = np.empty(self.events.size)
+        for i in range(self.events.size):
+        # for i in trange(self.events.size):
+            hets[i] = self.calc_hetero()
+            self.propagate(self.events.xs[i], self.events.ys[i], self.events.times[i])
+        return hets
         
         
         
@@ -392,30 +431,30 @@ cdef class SLFVP:
             cdef:
                 double birth_time, RMCA_time
             
-            birth_time = (self.state.individuals[id1].time + self.state.individuals[id2].time)*0.5
+            birth_time = (self.state.times[id1] + self.state.times[id2])*0.5
             
-            while id1 != id2 and id1 != 0 and id2!=0:
-                if (self.state.individuals[id1].time > self.state.individuals[id2].time):
-                    id1 = self.state.individuals[id1].p_id
+            while id1 != id2 and id1 != -1 and id2!=-1:
+                if (self.state.times[id1] > self.state.times[id2]):
+                    id1 = self.state.p_ids[id1]
                 else: 
-                    id2 = self.state.individuals[id2].p_id
-            RMCA_time = self.state.individuals[id1].time
-            
+                    id2 = self.state.p_ids[id2]
+            if id1 == -1 or id2==-1:
+                return -1
+            RMCA_time = self.state.times[id1]
             return birth_time - RMCA_time
         
-    cpdef mean_coalescense_time(self):
-        cdef:
-            list list_alive = list(self.state.ids_alive)
-            Py_ssize_t i, j
-            double mean_time = 0
+    def coalescense_time_hist(self):
+        times = list()
             
-        for i in tqdm(list_alive):
-            for j in list_alive:
-                if i<=j:
-                    continue
-                mean_time += self.coalescense_time(i, j)
-        mean_time /= self.state.n_alive * (self.state.n_alive-1) * 0.5
-        return mean_time
+        for i in tqdm(range(self.state.n_alive)):
+            for j in range(i+1,self.state.n_alive):
+                assert(self.state.ids_alive[i] != -1 and self.state.ids_alive[j] != -1 )
+                t = self.coalescense_time(self.state.ids_alive[i], self.state.ids_alive[j])
+                if t != -1:
+                    times.append(t)
+                
+        print(f"Mean coalescence time = {np.mean(times)}")
+        return plt.hist(times, bins = 100, density = True);
     
     
     cpdef mean_lifetime(self):
@@ -431,15 +470,39 @@ cdef class SLFVP:
     
     
     def lifetime(self):
-        list_dead = list(self.state.ids_dead)
         ltime = list()
-        for i in tqdm(list_dead):
-            ltime.append(self.state.individuals[i].death_time - self.state.individuals[i].time)
+        for i in tqdm(range(self.state.size)):
+            if self.state.death_times[i] != -1:
+                ltime.append(self.state.death_times[i] - self.state.times[i])
+        print(f"Mean-time = {np.mean(ltime)}")
+        return plt.hist(ltime, bins = 100, range=(0, 10), density = True);
+        
+        
+        
+    def build_lines(self, ids):
+        ax = plt.figure().add_subplot(projection='3d')
+        for i in ids:
+            ind = i
+            xs, ys, ts = list(), list(), list()
+            while ind != -1:
+                xs.append(self.state.xs[ind])
+                ys.append(self.state.ys[ind])
+                ts.append(self.state.times[ind])
+                
+                ind = self.state.p_ids[ind]
+                
+            ax.plot(xs, ys, ts)
+        
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.set_zlabel('t')
+        
+        plt.show()
+
+                
             
-        return plt.hist(ltime)
-        
-        
-        
+                
+                
         
         
                 
@@ -447,14 +510,15 @@ cdef class SLFVP:
     def density(self, z1, z2):
         denom = 0
         thetas = np.zeros(self.n_alleles)
-        list_alive = list(self.state.ids_alive)
-        for i in range(self.state.n_alive):
+        for i in self.state.ids_alive:
+            if i == -1:
+                break
             denom += self.h(z1, z2,
-                            self.state.individuals[list_alive[i]].x, self.state.individuals[list_alive[i]].y)
+                            self.state.xs[i], self.state.ys[i])
             for k in range(self.n_alleles):
-                if self.state.individuals[list_alive[i]].i_type[k] == 1:
+                if self.state.genotypes[i, k] == 1:
                     thetas[k] += self.h(z1, z2,
-                            self.state.individuals[list_alive[i]].x, self.state.individuals[list_alive[i]].y)
+                            self.state.xs[i], self.state.ys[i])
         thetas = thetas / denom
 
         return thetas
@@ -476,11 +540,11 @@ cdef class SLFVP:
         y = np.zeros((N,N))
         for i in range(N):
             for j in range(N):
-                y[i,j]=(np.logical_and(d1<(i+1)/N, d2<(j+1)/N).sum())
+                y[N-i-1,j]=(np.logical_and(d1<(i+1)/N, d2<(j+1)/N).sum())
         plt.imshow(y, extent=[0,1,0,1])
         
     
-    def plot_with_alleles(self, allele=0, alpha=0.5):
+    def plot_with_alleles(self, allele=0, alpha=0.5, name=None):
         cdef list xs1, xs2, ys1, ys2
         xs1 = list()
         xs2 = list()
@@ -488,16 +552,20 @@ cdef class SLFVP:
         ys2 = list()
     
 
-        for i in range(self.state.ids_alive):
+        for i in self.state.ids_alive:
+            if i == -1:
+                break
             if self.state.genotypes[i, allele] == 0:
                 xs1.append(self.state.xs[i])
                 ys1.append(self.state.ys[i])
             else:
                 xs2.append(self.state.xs[i])
                 ys2.append(self.state.ys[i])
-        plt.scatter(xs1, ys1, alpha, label ='0 allele')
-        plt.scatter(xs2, ys2, alpha, label = '1 allele')
+        plt.scatter(xs1, ys1, alpha, c='b', label ='0 allele')
+        plt.scatter(xs2, ys2, alpha, c='g', label = '1 allele')
         plt.legend()
+        if name!= None:
+            plt.savefig(name)
         plt.show();
         
         
@@ -534,6 +602,30 @@ cdef class SLFVP:
         plt.legend()
         plt.show();
         
+        
+            
+        
+    def build_tree(self, ids):
+        adj = []
+        finished = set()
+        q = queue.Queue()
+        for i in ids:
+            if i not in finished:
+                q.put(i)
+                finished.add(i)
+        while not q.empty():
+            idx = q.get()
+            id_p = self.state.p_ids[idx]
+            adj.append([idx, id_p])
+            finished.add(idx)
+            if id_p != -1 and id_p not in finished:
+                q.put(id_p)
+        G = nx.from_edgelist(adj)
+        pos = nx.nx_agraph.graphviz_layout(G, prog="dot", root = -1)
+        nx.draw(G, pos)
+                
+            
+            
         
         
         
