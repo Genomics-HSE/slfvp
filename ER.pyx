@@ -190,14 +190,14 @@ cdef class ER:
     cdef public:
         State state
         Events events
-        double L, rho, lamda, theta, alpha, time, u0, integral, beta
+        double L, rho, lamda, theta, alpha, time, u0, integral, beta, mu
         double [:] probs
         double [:,:] points 
         Py_ssize_t n_alleles, n_epoch, died, born
         Py_ssize_t [:] ids_newborn
         RndmWrapper seed
         
-    def __init__(self, double L=1, double lamda=1, double u0=0.4, double rho=1000, double theta=0.5,
+    def __init__(self, double L=1, double lamda=1, double u0=0.4, double rho=1000, double mu=0.0, double theta=0.5,
                  double alpha=1, Py_ssize_t n_alleles=10, n_epoch = 1000):
         self.rho=rho
         self.L=L
@@ -205,6 +205,7 @@ cdef class ER:
         self.theta=theta
         self.alpha=alpha
         self.lamda = lamda
+        self.mu=mu
         self.died = 0
         self.born = 0
         self.beta = 1
@@ -291,7 +292,6 @@ cdef class ER:
         cdef double x1, x2
         
         p_id = self.choose_parent(z1, z2)
-        i_type = self.state.genotypes[p_id]
         max_intensity = self.u(z1, z2, z1, z2)
         # n_points = self.died
         n_points = random_poisson(self.seed.rng, self.rho * self.integral)
@@ -302,6 +302,10 @@ cdef class ER:
             x2 = self.L * drand48()
 
             if self.L**2 * self.u(z1, z2, x1, x2) >= max_intensity * drand48():#Rejection sampling for inhomogenous Poisson point process
+                i_type = self.state.genotypes[p_id].copy()
+                for k in range(self.n_alleles):
+                    if drand48()<self.mu:
+                        i_type[k] = 1 - i_type[k]
                 self.state.add(p_id, time, x1, x2, i_type)
                 self.ids_newborn[generated] = self.state.size-1
                 generated += 1
@@ -368,12 +372,12 @@ cdef class ER:
     cpdef void run(self):
         '''But eternity is far too cruel fate for you, Ei'''
         cdef Py_ssize_t i
-        for i in range(self.events.size):
+        for i in tqdm(range(self.events.size)):
         # for i in trange(self.events.size):
             self.propagate(self.events.xs[i], self.events.ys[i], self.events.times[i]) 
             
             
-    cpdef double calc_hetero(self, allele=0):
+    cpdef double calc_hetero(self,  Py_ssize_t allele=0):
         cdef Py_ssize_t k=0, i
         cdef double prop=0
         
@@ -445,6 +449,8 @@ cdef class ER:
         
     def coalescense_time_hist(self):
         times = list()
+        cdef  Py_ssize_t i, j
+        cdef double t
             
         for i in tqdm(range(self.state.n_alive)):
             for j in range(i+1,self.state.n_alive):
@@ -470,6 +476,7 @@ cdef class ER:
     
     
     def lifetime(self):
+        cdef  Py_ssize_t i
         ltime = list()
         for i in tqdm(range(self.state.size)):
             if self.state.death_times[i] != -1:
@@ -479,7 +486,9 @@ cdef class ER:
         
         
         
-    def build_lines(self, ids):
+    cpdef build_lines(self, Py_ssize_t[:] ids):
+        cdef  Py_ssize_t i, ind
+        cdef  list xs, ys, ts
         ax = plt.figure().add_subplot(projection='3d')
         for i in ids:
             ind = i
@@ -504,10 +513,29 @@ cdef class ER:
                 
                 
         
+#     def mean_SAF(self, rho, u0, theta, x1, y1, x2, y2, n_steps, n_alleles, interval, niter):
+#         thatas1 = np.array((n_steps, n_alleles, niter))
+#         thatas2 = np.array((n_steps, n_alleles, niter))
         
+#         a = ER.ER(L=1,
+#                  lamda=1,
+#                  u0=u0,
+#                  rho=rho,
+#                  theta=theta,
+#                  alpha=1,
+#                  n_alleles=n_alleles,
+#                    n_epoch=n_steps)
+#         a.initiate(0.5)
+        
+#         for it  in range(niter):
+#             for i  in range(n_steps):
+#                 for _ in range(interval):
+#                     a.
+                    
                 
             
     def density(self, z1, z2):
+        cdef  Py_ssize_t i
         denom = 0
         thetas = np.zeros(self.n_alleles)
         for i in self.state.ids_alive:
@@ -525,6 +553,7 @@ cdef class ER:
 
 
     def plt_SFS1(self, z1, z2):
+        cdef  Py_ssize_t i
         d = self.density(z1, z2)
         N = 100
         y = []
@@ -534,6 +563,7 @@ cdef class ER:
 
 
     def plt_SFS2(self, z11, z12, z21, z22):
+        cdef  Py_ssize_t i, j
         d1 = self.density(z11, z12)
         d2 = self.density(z21, z22)
         N = 100
@@ -544,7 +574,8 @@ cdef class ER:
         plt.imshow(y, extent=[0,1,0,1])
         
     
-    def plot_with_alleles(self, allele=0, alpha=0.5, name=None):
+    def plot_with_alleles(self, int allele=0, double alpha=0.5, name=None):
+        cdef  Py_ssize_t i
         cdef list xs1, xs2, ys1, ys2
         xs1 = list()
         xs2 = list()
@@ -571,6 +602,7 @@ cdef class ER:
         
     cpdef plot_alleles(self, alpha=0.5):
         cdef list xs1, xs2, ys1, ys2
+        cdef  Py_ssize_t i
         xs1 = list()
         xs2 = list()
         xs3 = list()
@@ -605,7 +637,8 @@ cdef class ER:
         
             
         
-    def build_tree(self, ids):
+    def build_tree(self, Py_ssize_t[:] ids):
+        cdef  Py_ssize_t i, idx
         adj = []
         finished = set()
         q = queue.Queue()
